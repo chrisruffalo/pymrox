@@ -66,7 +66,7 @@ SAVE_CACHE_PATTERN = "{:s}/.cache/{:s}.png"
 LINE_PATTERN_REGEX = re.compile(r"^[0-9]+?[ ]+?(.+)$")
 
 # sets we are just not going to pull from
-BANNED_SETS = ["mps_akh", "lea", "leb", "pjgp", "pgpx", "ppre", "plpa", "pmgd", "pfnm", "parl", "pmei", "pmpr", "prm", "pcmp", "dd3_gvl", "v14", "s99", "cma", "tsb", "ced", "c16", "ema", "jvc", "dd3_jvc", "exp"]
+BANNED_SETS = ["mps_akh", "lea", "leb", "pjgp", "pgpx", "ppre", "plpa", "pmgd", "pfnm", "parl", "pmei", "pmpr", "prm", "pcmp", "dd3_gvl", "v14", "s99", "cma", "tsb", "ced", "c16", "ema", "jvc", "dd3_jvc", "exp", "v12"]
 
 # url pattern
 MCI_INFO_URL_PATTERN = "https://magiccards.info/scans/en/{:s}/{:s}.jpg"
@@ -118,33 +118,17 @@ def downloadImage(card, urlPattern = SCRYFALL_INFO_URL_PATTERN):
 			return downloadImage(card, MCI_INFO_URL_PATTERN)
 		print "[ERROR] {:s} | could not find {:s} (id={:s}, set={:s}) at any URL".format(str(e), card.name, cardId, setCode, url)
 
-def fix_card_with_infill(masky1, masky2, maskx1, maskx2, infillRange, card, img, fill_color = None, use_inverse = True, whiter_white = False, paint = True, dilate_iterations = 6):
+def fix_card_with_infill(masky1, masky2, maskx1, maskx2, infillRange, card, img, fill_color = None, paint = True, flood = False):
 	# fill colors for card identities
 	FILL_COLORS = {
-		"R": (0, 0, 200),
-		"G": (0, 200, 0),
-		"U": (200, 0, 0),
-		"B": (0, 0, 0),
-		"W": (210, 210, 210),
-		"GLD": (120, 120, 120),
-		"N": (195, 195, 195)
+		"R": (0, 0, 200), # red
+		"G": (0, 200, 0), # green
+		"U": (200, 0, 0), # blue
+		"B": (0, 0, 0), # black
+		"W": (210, 210, 210), # white
+		"GLD": (120, 120, 120), # multicolored/gold
+		"N": (195, 195, 195) # neutral/land/artifact
 	}
-
-	# color bounds for text searching
-	WHITE_LOWER_BOUND = np.array([230, 230, 230], dtype = "uint8")
-	if whiter_white:
-		WHITE_LOWER_BOUND = np.array([240, 240, 240], dtype = "uint8")
-	WHITE_UPPER_BOUND = np.array([255, 255, 255], dtype = "uint8")
-	BLACK_LOWER_BOUND = np.array([0, 0, 0], dtype = "uint8")
-	BLACK_UPPER_BOUND = np.array([95, 95, 95], dtype = "uint8")
-	GRAY_LOWER_BOUND = np.array([140, 140, 140], dtype = "uint8")
-	GRAY_UPPER_BOUND = np.array([255, 255, 255], dtype = "uint8")
-
-	#  boundary for white text
-	boundary_lower = WHITE_LOWER_BOUND
-	boundary_upper = WHITE_UPPER_BOUND
-	boundary_inverse_lower = BLACK_LOWER_BOUND
-	boundary_inverse_upper = BLACK_UPPER_BOUND
 
 	# eventually blend these? multi colored are gold, no color identity is more of a gray
 	if not fill_color:
@@ -155,90 +139,79 @@ def fix_card_with_infill(masky1, masky2, maskx1, maskx2, infillRange, card, img,
 			else:
 				fill_color = FILL_COLORS["GLD"]
 
-	if not hasattr(card, 'colorIdentity') or ("W" in card.colorIdentity or "G" in card.colorIdentity or "R" in card.colorIdentity or "U" in card.colorIdentity):
-		# black text
-		boundary_lower = BLACK_LOWER_BOUND
-		boundary_upper = BLACK_UPPER_BOUND
-		boundary_inverse_lower = WHITE_LOWER_BOUND
-		boundary_inverse_upper = WHITE_UPPER_BOUND
-	elif hasattr(card, 'colorIdentity') and ("B" in card.colorIdentity):
-		# more gray-ish text
-		boundary_lower = GRAY_LOWER_BOUND
-		boundary_upper = GRAY_UPPER_BOUND
-
 	# where files go
 	tmpdir = output_dir + "/.infill"
 	prefile = tmpdir + "/" + card.name + ".png"
 	maskfile = tmpdir + "/mask-" + card.name + ".png"
 	img.save(prefile)
 
-	# open temporary file
 	cv2_img = cv2.imread(prefile)
+	cv2_gray = cv2.cvtColor(cv2_img, cv2.COLOR_RGB2GRAY);
+
+	fast = cv2.FastFeatureDetector_create(threshold=25)
+	kp1 = fast.detect(cv2_img, None)
+
+	# invert image and try again
+	inv_image = 255 - cv2_gray
+	kp2 = fast.detect(inv_image, None)
+
+	kp = kp1
+	if len(kp2) > len(kp1):
+		kp = kp2
+
+	factor = 1
+	if flood:
+		factor = 2
+
+	radius = 1 * factor
+	# draw circles near features
+	feature_mask = np.zeros(cv2_gray.shape)
+	for k in kp:
+		point = (int(k.pt[0]), int(k.pt[1]))
+		cv2.circle(feature_mask, point, radius, (255, 255, 255), -1)
+
+	# bound the mask for speed
+	intermediate_mask = np.zeros(feature_mask.shape, np.uint8)
+	intermediate_mask[masky1:masky2, maskx1:maskx2] = feature_mask[masky1:masky2, maskx1:maskx2]
 
 	# allow flipping of dilation, etc, when card is flipped
-	rect_x = 4
-	rect_y = 3
+	rect_x = 8 * factor
+	rect_y = 2 * factor
 	if hasattr(card, 'layout') and "split" == card.layout:
-		rect_x = 3
-		rect_y = 4
-
-	# kernel size for morph operations
+		rect_x = 2 * factor
+		rect_y = 8 * factor
+	# dilate
 	kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (rect_x, rect_y))
+	lg_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (rect_x * (factor * 2), rect_y * (factor * 2)))
 
-	# precondition image mask
-	range_mask = cv2.blur(cv2_img, (3,3))
-	range_mask_mc = range_mask
-	#range_mask_invert = 255 - range_mask
+ 	dilate_iterations = 6
+	intermediate_mask = cv2.dilate(intermediate_mask, kernel, iterations = dilate_iterations) # dilate some
+	intermediate_mask = cv2.morphologyEx(intermediate_mask, cv2.MORPH_CLOSE, lg_kernel) # open
 
-	# determine areas of text
-	range_mask = cv2.inRange(range_mask, boundary_lower, boundary_upper)
-	# chop mask here to make processing faster
-	range_mask[masky1:masky2, maskx1:maskx2] = range_mask[masky1:masky2, maskx1:maskx2]
-	range_mask = cv2.dilate(range_mask, kernel, iterations = dilate_iterations / 2) # dilate some
-
-	# we are going to invert the image and combine the masks because sometimes there
-	# are multiple colors of text
-	if use_inverse:
-		range_mask_mc = cv2.inRange(range_mask_mc, boundary_inverse_lower, boundary_inverse_upper)
-		range_mask_mc[masky1:masky2, maskx1:maskx2] = range_mask_mc[masky1:masky2, maskx1:maskx2]
-		range_mask_mc = cv2.dilate(range_mask_mc, kernel, iterations = dilate_iterations) # dilate some because it's usually small
-		# combine dilated masks
-		range_mask = range_mask + range_mask_mc
-
-	range_mask = cv2.morphologyEx(range_mask, cv2.MORPH_OPEN, kernel) # open
-	range_mask = cv2.dilate(range_mask, kernel, iterations = dilate_iterations) # dilate again
-
-	# close with large kernel to remove odd edges?
-	lg_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (rect_x * 3, rect_y * 3))
-	range_mask = cv2.morphologyEx(range_mask, cv2.MORPH_CLOSE, lg_kernel) # close
-
-	# copy into zero'd arrays the contents of the detection/masking operation
-	mask = np.zeros(range_mask.shape, np.uint8)
-	mask[masky1:masky2, maskx1:maskx2] = range_mask[masky1:masky2, maskx1:maskx2]
-	#mask = range_mask
+	# finalize mask dimensions
+	mask = np.zeros(intermediate_mask.shape, np.uint8)
+	mask[masky1:masky2, maskx1:maskx2] = intermediate_mask[masky1:masky2, maskx1:maskx2]
 
 	# mask out cv2_img
 	cv2_img[np.where(mask)] = fill_color
 
-	# write mask(s) so we can see it (debug)
-	cv2.imwrite(maskfile, mask)
-
-	# in paint image when requested
+	# do inpaint if requested
 	if paint:
 		cv2_img = cv2.inpaint(cv2_img, mask, infillRange, cv2.INPAINT_TELEA)
-	cv2.imwrite(prefile, cv2_img)
 
-	# return img
+	#cv2_img = cv2.drawKeypoints(cv2_img, kp, None, color=(255,0,0))
+
+	cv2.imwrite(prefile, cv2_img)
 	return Image.open(prefile)
 
 def fix_split(card, img):
-	img = fix_card_with_infill(170, 480, img.size[0] - 60, img.size[0] - 28, 4, card, img, dilate_iterations = 4, use_inverse = False)
-	img = fix_card_with_infill(680, 980, img.size[0] - 60, img.size[0] - 28, 4, card, img, dilate_iterations = 4, use_inverse = False)
+	img = fix_card_with_infill(170, 480, img.size[0] - 60, img.size[0] - 28, 4, card, img)
+	img = fix_card_with_infill(680, 980, img.size[0] - 60, img.size[0] - 28, 4, card, img)
 	return img
 
 def fix_m15(card, img):
 	# variable height based on power/toughness or loyalty (creature/planeswalker)
-	MAX_HEIGHT = 60
+	MAX_HEIGHT = 64
 	MIN_HEIGHT = 38
 
 	height = MAX_HEIGHT
@@ -246,17 +219,17 @@ def fix_m15(card, img):
 		height = MIN_HEIGHT
 
 	# fix right side
-	img = fix_card_with_infill(img.size[1] - height, img.size[1] - 5, img.size[0] - 300, img.size[0] - 25, 2, card, img, fill_color = (0, 0, 0), use_inverse = False, whiter_white = True, paint = False)
+	img = fix_card_with_infill(img.size[1] - height, img.size[1] - 5, img.size[0] - 300, img.size[0] - 25, 2, card, img, fill_color = (0, 0, 0), paint = False, flood = True)
 	# fix left side
-	img = fix_card_with_infill(img.size[1] - MAX_HEIGHT, img.size[1] - 5, 25, 300, 2, card, img, fill_color = (0, 0, 0), use_inverse = False, whiter_white = True, paint = False)
+	img = fix_card_with_infill(img.size[1] - MAX_HEIGHT, img.size[1] - 5, 20, 300, 2, card, img, fill_color = (0, 0, 0), paint = False, flood = True)
 	# fix center
-	img = fix_card_with_infill(img.size[1] - MIN_HEIGHT, img.size[1] - 5, 300, img.size[0] - 300, 2, card, img, fill_color = (0, 0, 0), use_inverse = False, whiter_white = True, paint = False)
+	img = fix_card_with_infill(img.size[1] - MIN_HEIGHT, img.size[1] - 5, 250, img.size[0] - 250, 2, card, img, fill_color = (0, 0, 0), paint = False, flood = True)
 
 	# return adjusted image
 	return img
 
 def fix_pw(card, img):
-	return fix_card_with_infill(img.size[1] - 68, img.size[1] - 5, img.size[0] - 575, img.size[0] - 150, 2, card, img, fill_color = (0, 0, 0), use_inverse = False, whiter_white = True, paint = False)
+	return fix_card_with_infill(img.size[1] - 70, img.size[1] - 5, img.size[0] - 575, img.size[0] - 150, 2, card, img, fill_color = (0, 0, 0), paint = False, flood = True)
 
 def fix_modern(card, img):
 	return fix_card_with_infill(945, 990, 45, 500, 4, card, img)
@@ -336,7 +309,7 @@ for line in file:
 		cardSet = db.sets[cardSetId]
 
 		# skip sets without black borders
-		if cardSetId.lower() in BANNED_SETS or (hasattr(cardSet,'onlineOnly') and cardSet.onlineOnly):
+		if cardSetId.lower() in BANNED_SETS: #or (hasattr(cardSet,'onlineOnly') and cardSet.onlineOnly):
 			continue
 
 		# attempt to get card from db
@@ -348,6 +321,10 @@ for line in file:
 		# keep card if it is valid and has some sort of numerical identifier
 		if not card and cardCheck and getCardId(cardCheck):
 			card = cardCheck
+
+		# dont immediately accept timeshifted cards
+		if cardCheck and hasattr(cardCheck, 'timeshifted') and cardCheck.timeshifted:
+			continue
 
 		# if card is found with a black border, break (otherwise keep searching)
 		# this means that a white bordered card will still show up but if a black bordered

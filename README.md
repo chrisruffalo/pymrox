@@ -1,6 +1,8 @@
 # PyMrox
 
-Makes proxy images by removing copyrights from MTG card images. This is intended for proxy/playtest purposes only. I do not condone stealing MTG cards but sometimes you want to make a high quality proxy. Various card printing services will not print images with a copyright on them. Removing the copyright serves two purposes. The first is to allow them to be printed. The second is to do so in such a way that the card could **never** be mistaken for the real thing even to the most casual observer.
+Makes proxy images by conditioning, adding borders, and removing border information from MTG card images. This is intended for proxy/playtest purposes only. Sometimes you want to make a high quality proxy. Various card printing services will not print images with additional information related to the publisher. 
+
+Removing the additional information serves two purposes. The first is to allow them to be printed. The second is to do so in such a way that the card could **never** be mistaken for the real thing even to the most casual observer.
 
 ## Prerequisites
 * python2

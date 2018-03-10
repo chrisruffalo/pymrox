@@ -30,12 +30,18 @@ import cv2
 from mtgjson import CardDb
 
 # parse options
-parser = argparse.ArgumentParser(description='Remove information from border of MTG cards.')
+parser = argparse.ArgumentParser(description='Condition and remove information from border of MTG cards in the quest of making perfect proxies.')
+parser.add_argument('--debug', '-d', dest='debug', action='store_true', default=False, help='Adds debug regions (contours, fill, bounding mask) to the image so that you can see and debug the results of the detection phase.')
+parser.add_argument('--mask', '-m', dest='mask', action='store_true', default=False, help='Outputs the mask used to generate the contours instead of the card image itself. This is amore esoteric but informative version of --debug.')
 parser.add_argument('--clear', '-c', dest='clear', action='store_true', default=False, help='Clear the downloaded image cache. (It will take longer to redownload cards.)')
 parser.add_argument('--overwrite', '-w', dest='overwrite', action='store_true', default=False, help='Overwrite cards that have already been processed. (It takes longer to write every card.)')
 parser.add_argument('--remove', '--rm', '-r', dest='remove', action='store_true', default=False, help='Delete all of the processed cards before processing more. (Basically like --overwrite except all at once and before it starts.)')
 parser.add_argument('--bless', '-b', dest='bless', nargs='+', default=[], help='Tempoarily bless a given set during a run. Best used to pull a single card that is wrong after the rest of the cards have been pulled. (Hint: do not use with --overwrite.) ')
+parser.add_argument('--set', '-S', dest='force_set', default=None, help='Force the card to come from a certain set. The value should be the set code like 5ED, VIS, WTH, M15, or similar.')
 parser.add_argument('--single','-s', dest='single', action='store_true', default=False, help='Instead of accepting a deck list the tool accepts the name of a single card as the input. Implies --overwrite.')
+parser.add_argument('--border', '-B', dest='border', type=int, default=36, help='The amount to expand the image for the border.')
+parser.add_argument('--autocontrast', '-a', dest='autocontrast', type=int, default=-1, help='The autocontrast cutoff percentage threshold. Makes any colors under this percentage of the histogram black. See OpenCV\' documentation on autocontrast for more information.')
+parser.add_argument('--lighten', '-l', dest='lighten', type=float, default=-1, help='The lightening transform to use for the card. A value of 1.0 means no change. Less than 1.0 means darker. More than 1.0 means lighter.')
 parser.add_argument('decklist', metavar='D', help='The input deck list. See README.md for format information.')
 parser.add_argument('outputdir', metavar='O', default='/tmp', help='The location that the downloaded card images will be written to.')
 args = parser.parse_args()
@@ -241,24 +247,24 @@ def downloadImage(card, urlPattern = SCRYFALL_INFO_URL_PATTERN):
 		print "[ERROR] {:s} | could not find {:s} (id={:s}, set={:s}) at any URL".format(str(e), card.name, cardId, setCode, url)
 
 def mask_from_cv_image(card, cv_img):
-	kern_x = 80
-	kern_y = 10
+	kern_x = 78
+	kern_y = 4
 	# rotate kernel if card is split layout
 	if hasattr(card, 'layout') and "split" == card.layout:
 		swap = kern_x
 		kern_x = kern_y
-		kern_y = swap
+		kern_y = swap7
 
 	# need grayscale copy
 	gray = cv2.cvtColor(cv_img, cv2.COLOR_RGB2GRAY)
 
 	# kernels for operations
 	rectKernel = cv2.getStructuringElement(cv2.MORPH_RECT, (kern_x, kern_y))
-	sqKernel = cv2.getStructuringElement(cv2.MORPH_RECT, (8, 8))
-	smKernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
+	sqKernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
+	horizontalKernel = cv2.getStructuringElement(cv2.MORPH_RECT, (9, 3))
 
 	# tophat
-	tophat = cv2.morphologyEx(gray, cv2.MORPH_TOPHAT, rectKernel)
+	tophat = cv2.morphologyEx(gray, cv2.MORPH_TOPHAT, sqKernel)
 
 	# gradient operations
 	gradX = cv2.Sobel(gray, ddepth=cv2.CV_32F, dx=1, dy=0, ksize=-1)
@@ -281,7 +287,7 @@ def mask_from_cv_image(card, cv_img):
 	thresh = cv2.threshold(grads, 0, 255, cv2.THRESH_BINARY | cv2.THRESH_OTSU)[1]
 
 	# dilate some
-	thresh = cv2.dilate(thresh, smKernel, iterations = 5)
+	thresh = cv2.dilate(thresh, horizontalKernel, iterations = 7)
 
 	# close with kernel
 	thresh = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, sqKernel)
@@ -292,6 +298,9 @@ def mask_from_cv_image(card, cv_img):
 # took a lot of hints from here:
 # https://www.pyimagesearch.com/2017/07/17/credit-card-ocr-with-opencv-and-python/
 def fix_card_with_infill(masky1, masky2, maskx1, maskx2, card, img, fill_color = None, paint = True, flood = False, infillRange = 15):
+	# fill color will be white unless unspecified
+	if not fill_color:
+		fill_color = (255, 255, 255)
 
 	# where files go
 	tmpdir = output_dir + "/.infill"
@@ -299,42 +308,35 @@ def fix_card_with_infill(masky1, masky2, maskx1, maskx2, card, img, fill_color =
 	img.save(prefile)
 
 	img = cv2.imread(prefile)
-	
-	# get masks
+
+	# get masks and crop them
 	output = mask_from_cv_image(card, img)
-	output_invert = mask_from_cv_image(card, 255 - img)
-
-	# add masks together
-	#output = output + output_invert
-
 	mask = np.zeros(output.shape, np.uint8)
 	mask[masky1:masky2, maskx1:maskx2] = output[masky1:masky2, maskx1:maskx2]
-
-	output_masked_inv = np.zeros(output.shape, np.uint8)
-	output_masked_inv[masky1:masky2, maskx1:maskx2] = output_invert[masky1:masky2, maskx1:maskx2]
-
-	# decide which mask has more contours
 	_, contours, _ = cv2.findContours(mask, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
-	_, contours_inv, _ = cv2.findContours(mask, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
-	if len(contours_inv) > len(contours):
-		contours = contours_inv
-		output_masked = output_masked_inv
-
-	# get fill color from near mask
-	if not fill_color:
-	#	fill_color = img[maskx1 - 1, masky1 - 1]
-		fill_color = (255, 255, 255)
-
-	# mask out cv2_img
-	img[np.where(mask)] = fill_color
+	
+	# use contours to draw filled-in areas on map
+	contour_mask = np.zeros(output.shape, np.uint8)
+	kept_contours = []
+	for c in contours:
+		if cv2.contourArea(c) > 450: # arbitrary threshold
+			cv2.drawContours(contour_mask, [c], 0, 255, -1)
+			kept_contours.append(c)
+	contours = kept_contours
+	mask = contour_mask
 
 	# do inpaint if requested
-	if paint:
+	if paint and not args.debug and not args.mask:
 		img = cv2.inpaint(img, mask, infillRange, cv2.INPAINT_TELEA)
+	else:
+		img[np.where(mask)] = fill_color
 
-	# draw mask area (debuging)
-	#cv2.drawContours(img, contours, -1, (255,0,0), 3)
-	#cv2.rectangle(img, (maskx1, masky1), (maskx2, masky2), (0, 255, 0), 2)
+	# draw mask and fill areas (debuging)
+	if args.mask:
+		img = mask
+	elif args.debug:
+		cv2.drawContours(img, contours, -1, (255,0,255), 4)
+		cv2.rectangle(img, (maskx1, masky1), (maskx2, masky2), (0, 255, 0), 4)
 
 	cv2.imwrite(prefile, img)
 	return Image.open(prefile)
@@ -381,7 +383,7 @@ def fix_cards_in_sets_with_a_range_of_locations(card, img):
 	return fix_card_with_infill(940, 990, 45, 555, card, img)
 
 def fix_cards_with_centered_illustrator(card, img):
-	return fix_card_with_infill(925, 979, 120, 575, card, img)
+	return fix_card_with_infill(925, 979, 100, 575, card, img)
 
 def fix_cards_with_left_illustrator(card, img):
 	return fix_card_with_infill(925, 970, 50, 555, card, img)
@@ -389,80 +391,96 @@ def fix_cards_with_left_illustrator(card, img):
 # basically starts to fix the card, autocontrast, lighten, etc
 # and also hands off to specific functions that handle masked
 # areas of each different card style/type
-def fix_cards(card, img):
+def fix_card(card, img):
 	# crop off 10 pixels on each side to remove borders, potentially adjust for each generation of card
 	i_width, i_height = img.size
-	img = img.crop([10,10,i_width - 10, i_height - 10])
+	img = img.crop([10 ,10, i_width - 10, i_height - 10])
 
 	# just rgb because transparent corners actually hurt a bit
 	img = img.convert('RGB') 
 
 	# default brightness enhancement factor
-	l_factor = 1.05
+	l_factor = 1.08
 
 	# get set code
 	sCode = card.set.code.lower()
 
+	# autocontrast threshold
+	autocontrast = 10
+
+	# function to use (default is to fix cards with illustrator on the left)
+	operational_func = fix_cards_with_left_illustrator
+
 	# the pattern is to ALWAYS correct the contrast and then
 	# to do the computer vision work on the card. this gives
 	# us the _best_ chance of detecting contours nad having
-	# blacks that fill in properly
+	# blacks that fill in properly. so the set-sepecific logic
+	# selects a function for removing text and sets other
+	# settings that will make the card look better
 
 	# version/era specific fixes
 	if hasattr(card, 'layout') and "split" == card.layout:
 		#print "Fixing split layout card"
-		img = ImageOps.autocontrast(img, 15)
-		img = fix_cards_with_split_layout(card, img)
+		operational_func = fix_cards_with_split_layout
 	elif card.set.releaseDate < BFZ_RELEASE and hasattr(card, 'loyalty'):
 		#print "Fixing planeswalker card"
-		img = ImageOps.autocontrast(img, 15)
-		img = fix_planeswalker(card, img)
+		autocontrast = 15
+		operational_func = fix_planeswalker
 		l_factor = 1.0
-	elif sCode in ["vma", "ema"]:
+	elif sCode in ["vma", "ema", "mm3"]:
 		#print "Fixing ==VMA, EMA card"
-		img = ImageOps.autocontrast(img, 12)
-		img = fix_cards_with_illustrator_on_black_background(card, img)
+		autocontrast = 12
+		operational_func = fix_cards_with_illustrator_on_black_background
 	elif sCode in ["fut"] and (hasattr(card, 'power') or hasattr(card, 'toughness')): # future sight creatures have a different card layout ???
-		img = ImageOps.autocontrast(img, 12)
-		img = fix_futuresight_creature_card(card, img)
+		autocontrast = 12
+		operational_func = fix_futuresight_creature_card
 	elif sCode in ["vis", "wth", "sth", "me4", "5ed"]:
 		#print "Fixing ==VIS, WTH, STH, ME4, ME3"
-		img = ImageOps.autocontrast(img, 12)
-		img = fix_cards_with_left_illustrator(card, img)
+		autocontrast = 12
+		operational_func = fix_cards_with_left_illustrator
 	elif sCode in ["med", "me3"]:
-		#print "Fixing ==MED,ME3 card"
-		img = ImageOps.autocontrast(img, 10)
-		img = fix_cards_with_centered_illustrator(card, img)		
+		#print "Fixing ==MED, ME3 card"
+		autocontrast = 10
+		operational_func = fix_cards_with_centered_illustrator
 	elif card.set.releaseDate >= M_15_RELEASE:
 		#print "Fixing >=M15 card"
-		adjust = 0
 		if hasattr(card, 'colorIdentity') and "W" in card.colorIdentity:
-			adjust = 8
+			autocontrast = 18
 			l_factor = 1.02
-		img = ImageOps.autocontrast(img, 18 + adjust)
-		img = fix_cards_with_illustrator_on_black_background(card, img)
+		operational_func = fix_cards_with_illustrator_on_black_background
 	elif card.set.releaseDate >= M_08_RELEASE:
 		#print "Fixing >=8ED card"
-		adjust = 0
 		if hasattr(card, 'colorIdentity') and "W" in card.colorIdentity:
 			l_factor = 1.00
 		if "bng" == sCode:
-			adjust = 16
-		img = ImageOps.autocontrast(img, 10 + adjust)
-		img = fix_cards_with_paintbrush_illustrator(card, img)
+			autocontrast = 16
+		operational_func = fix_cards_with_paintbrush_illustrator
 	elif card.set.releaseDate > M_04_RELEASE:
 		#print "Fixing >=4ED card"
-		img = ImageOps.autocontrast(img, 10)
-		img = fix_cards_with_centered_illustrator(card, img)
-	else:
-		#print "Fixing remaining cards"
-		img = ImageOps.autocontrast(img, 10)
-		img = fix_cards_with_left_illustrator(card, img)
-		l_factor = 1.08
+		operational_func = fix_cards_with_centered_illustrator
+
+	# do autocontrast
+	if args.autocontrast >= 0:
+		autocontrast = args.autocontrast
+	img = ImageOps.autocontrast(img, autocontrast)
+
+	# do selected function for fixing text
+	img = operational_func(card, img)
 
 	# lighten just a little bit
+	if args.lighten >= 0:
+		l_factor = args.lighten
 	enhancer = ImageEnhance.Brightness(img)
 	img = enhancer.enhance(l_factor)		
+
+	# create 36px border
+	fill_border = "black"
+	if hasattr(card,'border') and "black" != card.border:
+		fill_border = card.border
+	img = ImageOps.expand(img, border=args.border, fill=fill_border)
+
+	# final resize to fit
+	img = img.resize(RESIZE_TARGET, Image.ANTIALIAS)
 
 	return img
 
@@ -471,10 +489,15 @@ def handle_card(card_name_input):
 	if not card_name_input.strip():
 		return
 
+	# available sets
+	available_sets = db.sets.keys()
+	if args.force_set:
+		available_sets = [args.force_set.upper()]
+
 	# look for oldest version of the card from black bordered sets that are not online only
 	# this skips the first four sets because, frankly, they are a little outmoded
 	card = None
-	for cardSetId in db.sets.keys():
+	for cardSetId in available_sets:
 		# get card set
 		cardSet = db.sets[cardSetId]
 
@@ -549,17 +572,7 @@ def handle_card(card_name_input):
 	output_image = img
 
 	# mitigate copyright based on frame type
-	output_image = fix_cards(card, output_image)
-
-	# create 36px border
-	fill_border = "black"
-	if hasattr(card,'border') and "black" != card.border:
-		fill_border = card.border
-	output_image = ImageOps.expand(output_image,border=36,fill=fill_border)
-
-	# final resize to fit
-	output_image = output_image.resize(RESIZE_TARGET, Image.ANTIALIAS)
-
+	output_image = fix_card(card, output_image)
 	output_image.save(toSave)
 	print "Saved {:s} - {:s} (cached@ {:s}) (set={:s}, id={:s})".format(card.name, toSave, cacheImage, getCardSetCode(card), getCardId(card))
 

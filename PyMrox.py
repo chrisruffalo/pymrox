@@ -35,6 +35,7 @@ parser.add_argument('--clear', '-c', dest='clear', action='store_true', default=
 parser.add_argument('--overwrite', '-w', dest='overwrite', action='store_true', default=False, help='Overwrite cards that have already been processed. (It takes longer to write every card.)')
 parser.add_argument('--remove', '--rm', '-r', dest='remove', action='store_true', default=False, help='Delete all of the processed cards before processing more. (Basically like --overwrite except all at once and before it starts.)')
 parser.add_argument('--bless', '-b', dest='bless', nargs='+', default=[], help='Tempoarily bless a given set during a run. Best used to pull a single card that is wrong after the rest of the cards have been pulled. (Hint: do not use with --overwrite.) ')
+parser.add_argument('--single','-s', dest='single', action='store_true', default=False, help='Instead of accepting a deck list the tool accepts the name of a single card as the input. Implies --overwrite.')
 parser.add_argument('decklist', metavar='D', help='The input deck list. See README.md for format information.')
 parser.add_argument('outputdir', metavar='O', default='/tmp', help='The location that the downloaded card images will be written to.')
 args = parser.parse_args()
@@ -240,7 +241,7 @@ def downloadImage(card, urlPattern = SCRYFALL_INFO_URL_PATTERN):
 		print "[ERROR] {:s} | could not find {:s} (id={:s}, set={:s}) at any URL".format(str(e), card.name, cardId, setCode, url)
 
 def mask_from_cv_image(card, cv_img):
-	kern_x = 78
+	kern_x = 80
 	kern_y = 10
 	# rotate kernel if card is split layout
 	if hasattr(card, 'layout') and "split" == card.layout:
@@ -368,7 +369,7 @@ def fix_planeswalker(card, img):
 	return fix_card_with_infill(img.size[1] - 70, img.size[1] - 5, img.size[0] - 575, img.size[0] - 150, card, img, fill_color = (0, 0, 0), paint = False, flood = True)
 
 def fix_cards_with_paintbrush_illustrator(card, img):
-	return fix_card_with_infill(940, 990, 35, 450, card, img)
+	return fix_card_with_infill(940, 990, 35, 540, card, img)
 
 def fix_futuresight_creature_card(card, img):
 	return fix_card_with_infill(930, 985, 75, 555, card, img)
@@ -377,13 +378,13 @@ def fix_cards_in_sets_with_a_range_of_locations(card, img):
 	return fix_card_with_infill(940, 990, 45, 560, card, img)
 
 def fix_cards_in_sets_with_a_range_of_locations(card, img):
-	return fix_card_with_infill(940, 990, 45, 560, card, img)
+	return fix_card_with_infill(940, 990, 45, 555, card, img)
 
 def fix_cards_with_centered_illustrator(card, img):
 	return fix_card_with_infill(925, 979, 120, 575, card, img)
 
 def fix_cards_with_left_illustrator(card, img):
-	return fix_card_with_infill(925, 970, 50, 500, card, img)
+	return fix_card_with_infill(925, 970, 50, 555, card, img)
 
 # basically starts to fix the card, autocontrast, lighten, etc
 # and also hands off to specific functions that handle masked
@@ -414,7 +415,7 @@ def fix_cards(card, img):
 		img = fix_cards_with_split_layout(card, img)
 	elif card.set.releaseDate < BFZ_RELEASE and hasattr(card, 'loyalty'):
 		#print "Fixing planeswalker card"
-		img = ImageOps.autocontrast(img, 12)
+		img = ImageOps.autocontrast(img, 15)
 		img = fix_planeswalker(card, img)
 		l_factor = 1.0
 	elif sCode in ["vma", "ema"]:
@@ -465,17 +466,10 @@ def fix_cards(card, img):
 
 	return img
 
-# open file specified to use to find cards
-input_filename = sys.argv[1]
-file = open(input_filename, "r")
-for line in file:
-	# condition string
-	line = line.rstrip()
-	line = LINE_PATTERN_REGEX.sub(r"\1", line)
-
+def handle_card(card_name_input):
 	# if conditioned line is empty, go to next line
-	if not line.strip():
-		continue
+	if not card_name_input.strip():
+		return
 
 	# look for oldest version of the card from black bordered sets that are not online only
 	# this skips the first four sets because, frankly, they are a little outmoded
@@ -489,10 +483,10 @@ for line in file:
 			continue
 
 		# attempt to get card from db
-		cardCheck = cardSet.cards_by_name.get(line)
+		cardCheck = cardSet.cards_by_name.get(card_name_input)
 		# lookup card another way if card not found
 		if not cardCheck:
-			cardCheck = cardSet.cards_by_ascii_name.get(line.lower())
+			cardCheck = cardSet.cards_by_ascii_name.get(card_name_input.lower())
 
 		# some cards have bad matches in each set so we don't want to keep the match
 		if cardCheck and cardCheck.set.code.lower() in BANNED_CARDS and cardCheck.name in BANNED_CARDS[cardCheck.set.code.lower()]:
@@ -515,9 +509,9 @@ for line in file:
 
 	# if no card is found after search we need to move on
 	if not card:
-		print "[ERROR] card {:s} not found in available sets/cards".format(line)
+		print "[ERROR] card {:s} not found in available sets/cards".format(card_name_input)
 		# skip rest of loop
-		continue
+		return
 
 	# get card file name
 	cardCacheFileName = getCardFileName(card)
@@ -527,9 +521,9 @@ for line in file:
 	toSave = SAVE_MODIFIED_PATTERN.format(output_dir, cardFileName)
 
 	# don't overwrite files unless asked
-	if not args.overwrite and os.path.isfile(toSave):
+	if not args.single and not args.overwrite and os.path.isfile(toSave):
 		print "Existing {:s} @ {:s} (set={:s}, id={:s})".format(card.name, toSave, getCardSetCode(card), getCardId(card))
-		continue
+		return
 
 	# look for cached image and skip download if in cache
 	img = None
@@ -549,7 +543,7 @@ for line in file:
 	
 	if not img:
 		print "[ERROR] No image data found for {:s}".format(card.name)
-		continue
+		return
 
 	# convert to output_img for chaining and making this easier to move around and maintain
 	output_image = img
@@ -568,3 +562,16 @@ for line in file:
 
 	output_image.save(toSave)
 	print "Saved {:s} - {:s} (cached@ {:s}) (set={:s}, id={:s})".format(card.name, toSave, cacheImage, getCardSetCode(card), getCardId(card))
+
+if not args.single:
+	# open file specified to use to find cards
+	input_filename = args.decklist
+	file = open(input_filename, "r")
+	for line in file:
+		# condition string
+		line = line.rstrip()
+		line = LINE_PATTERN_REGEX.sub(r"\1", line)
+
+		handle_card(line)
+else:
+	handle_card(args.decklist)
